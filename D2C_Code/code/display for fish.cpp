@@ -7,6 +7,7 @@
 //  added the D2C testing code     //
 //---------------------------------//
 
+#include "windows.h"
 #include "mujoco.h"
 #include "glfw3.h"
 #include "stdio.h"
@@ -14,77 +15,50 @@
 #include "malloc.h"
 #include "math.h" 
 #include "time.h"
+#include "Eigen/Geometry"
+
+using namespace Eigen;
 
 //-------------------------------- macro variables --------------------------------------
-// model selection: PENDULUM CARTPOLE SWIMMER6 SWIMMER3
-#define SWIMMER6
+// model selection: FISH HUMANOID
+// EULER QUAT
+#define FISH
+#define EULER
 #define CTRL_LIMITTED false
 #define SYSIDCHECK false
 #define PERFCHECK false
 #define FINALCOST false
+#define CLOPCOMPARE false
 #define ERRCOMPARE false
 #define LOCAL true
 #define PI 3.141592653
 
 //-------------------------------- global variables -------------------------------------
 // user customized parameters
-#if defined(SWIMMER3)
-const mjtNum t_step = 0.005;//0.01;0.01;800
+#if defined(HUMANOID)
+const mjtNum t_step = 0.02;
 const mjtNum cal_step = 0.005;
-const mjtNum ptb_coef = 0.05;
-const int step_max = 1600;
-const int ctrl_num = 2;
-const int NS = 10;
-const char* mname = "swimmer3.xml";
+const mjtNum ptb_coef = 0.0;
+const int step_max = 250;
+const int ctrl_num = 21;
+const int NS = 54;
+const char* mname = "humanoid.xml";
 static bool TOP_FLAG = false;
 const mjtNum K[NS] = { 0 };
-mjtNum state_nominal[step_max + 1][NS + 1] = { 0 };
+mjtNum state_nominal[step_max + 1][NS + 1] = { 0.0, 0.0, 0, 0, 1.3, 0, 1, 0, 0 };
 mjtNum x_goal[NS] = { 0 };
-#elif defined(SWIMMER6)
-const mjtNum t_step = 0.006;//0.01;0.01;900
-const mjtNum cal_step = 0.006;
-const mjtNum ptb_coef = .03;
-const int step_max = 1500;
-const int ctrl_num = 5;
-const int NS = 16;
-const char* mname = "swimmer6.xml";
+#elif defined(FISH)
+const mjtNum t_step = 0.005;//0.002,3000
+const mjtNum cal_step = 0.005;
+const mjtNum ptb_coef = 0.1;
+const int step_max = 1200;
+const int ctrl_num = 6;
+const int NS = 26;
+const char* mname = "fish.xml";
 static bool TOP_FLAG = false;
 const mjtNum K[NS] = { 0 };
-mjtNum state_nominal[step_max + 1][NS + 1] = { 0.0 };
+mjtNum state_nominal[step_max + 1][NS] = { 0.0, 0.0, 0, 0, 0, 0, 1, 0, 0 };
 mjtNum x_goal[NS] = { 0 };
-#elif defined(PENDULUM)
-const mjtNum t_step = 0.1;
-const mjtNum cal_step = 0.1;
-const mjtNum ptb_coef = 0.3;
-const int step_max = 30;
-const int ctrl_num = 1;
-const int NS = 2;
-const mjtNum K[NS] = { 11.0396, 3.0658 };// { 5.4995, 1.2227 };
-const char* mname = "pendulum.xml";
-static bool TOP_FLAG = false;
-mjtNum state_nominal[step_max + 1][NS] = { PI, 0.0};
-// top is 0
-mjtNum x_goal[NS] = {
-	(mjtNum)(2*PI),
-	(mjtNum)(0),
-};
-#elif defined(CARTPOLE)
-const mjtNum t_step = 0.1;
-const mjtNum cal_step = 0.1;
-const mjtNum ptb_coef = 0.3;
-const int step_max = 30;
-const int ctrl_num = 1;
-const int NS = 4;
-const mjtNum K[NS] = { -1.0959, -2.3829, -33.7244, -8.8701 }; //{ -1.5483, -2.7929, -31.4640 ,-9.6952 };//{ -0.0787, - 0.1996, - 13.0807 ,- 3.0313 };
-const char* mname = "cartpole.xml";
-static bool TOP_FLAG = false;
-mjtNum state_nominal[step_max + 1][NS] = { 0, 0, 0, 0.0 };
-mjtNum x_goal[NS] = {
-	(mjtNum)(0),
-	(mjtNum)(0),
-	(mjtNum)(-PI),//0.5s PI
-	(mjtNum)(0),
-};
 #endif
 
 // model
@@ -98,30 +72,31 @@ char lastfile[1000] = "";
 char error[1000];
 static int32_t trial = 0;
 static int tri_num = 0;
-const int n_check = 1000;
+const int n_check = 500;
 const mjtNum slowmotion1 = 1;
 const mjtNum slowmotion2 = 0.3; // smaller faster
 int stepite = (int)(t_step / cal_step);
 mjtNum ulim = 0;
-mjtNum actual_ctrl[step_max*ctrl_num];
-mjtNum dx[n_check][step_max + 1][NS];
-mjtNum delta_xc[n_check][step_max][NS + ctrl_num] = { 0 };
-mjtNum delta_xcs[n_check][step_max][NS] = { 0 };
-mjtNum mat[step_max][NS][NS + ctrl_num] = { 0 };
 mjtNum u[step_max * ctrl_num] = {0};
-mjtNum res[step_max][step_max];
 mjtNum delta_u[step_max * ctrl_num] = { 0 };
 mjtNum ctrl_nominal[step_max * ctrl_num] = { 0 };
 mjtNum state_openlp[step_max + 1][NS] = { 0 };
 mjtNum state_closedlp[step_max + 1][NS] = { 0 };
-mjtNum state_geomclp[step_max + 1][NS] = { 0 };
+mjtNum control[step_max + 1][ctrl_num] = { 0 };
+mjtNum quaterr[step_max + 1][4] = { 0 };
+mjtNum quat[step_max+1][4] = { 0 };
+mjtNum fval_nominal[4] = { 0 };
+mjtNum fval_openlp[4] = { 0 };
+mjtNum fval_closedlp[4] = { 0 };
 mjtNum TK[step_max][ctrl_num][NS] = { 0 };
-char ctrl_buff[30], glstr[30];
+mjtNum Jcl = 0, Jop = 0;
+char ctrl_buff[30], glstr[30], para_buff[20];
 char *str, *str3;
 FILE *fp, *fp1, *fp2, *fop, *fop1, *fop2;
 char mfilename[30];
 char kfilename[30];
 char dfilename[30];
+char pcname[30];
 #if LOCAL == false
 char mfilepre[17] = "../../../model/";
 char kfilepre[17] = "../../../doc/";
@@ -131,7 +106,11 @@ char mfilepre[15] = "";
 char kfilepre[15] = "";
 char dfilepre[15] = "";
 #endif
-
+/* Parameters read from file fop */
+mjtNum Q;
+mjtNum QT;
+mjtNum R;
+mjtNum Qm[NS][NS], QTm[NS][NS];
 // user state
 bool paused = true;
 bool showoption = false;
@@ -1132,239 +1111,201 @@ double angle_norm(double theta)
 	return (fmod(theta + PI, 2 * PI) - PI); // result top is 0, bottom is pi, both side
 }
 
-int get_nominal(mjModel* m, mjData* d)
+// w x y z to roll pitch yaw
+void quat2smpl(double *res, double *quat)
 {
-	static int index = 0;
-	static mjtNum t_init = -0.2;
+	double b0, b1, b2, b3;
 
-	if (d->time - t_init < t_step - 0.00001)
-	{
-		mj_step(m, d);
-	}
-	else {
-		if (t_init < -0.1)
-		{
-			mju_zero(d->qpos, m->nq);
-			mju_zero(d->qvel, m->nv);
-			for (int y = 0; y < m->nq; y++)
-			{
-				d->qpos[y] = state_nominal[0][2 * y];
-			}
-			for (int y = 0; y < m->nv; y++)
-			{
-				d->qvel[y] = state_nominal[0][2 * y + 1];
-			}
-			for (int ci = 0; ci < ctrl_num; ci++)
-			{
-				d->ctrl[ci] = ctrl_nominal[0 * ctrl_num + ci];
-			}
-		}else {
-			index++;
-			for (int y = 0; y < m->nq; y++)
-			{
-				state_nominal[index][2 * y] = d->qpos[y];
-			}
-			for (int y = 0; y < m->nv; y++)
-			{
-				state_nominal[index][2 * y + 1] = d->qvel[y];
-			}
-			if (index >= step_max) {
-				return 1;
-			}
-			else {
-				for (int ci = 0; ci < ctrl_num; ci++)
-				{
-					d->ctrl[ci] = ctrl_nominal[index * ctrl_num + ci];
-				}
-			}
-		}
-		t_init = d->time;
-	}
-	return 0;
+	b0 = *quat;
+	b1 = *(quat + 1);
+	b2 = *(quat + 2);
+	b3 = *(quat + 3);
+
+	Quaterniond q = Eigen::Quaterniond(b0, b1, b2, b3); // w x y z
+	auto r = q.toRotationMatrix().eulerAngles(0, 1, 2);
+
+	*res = r[0];
+	*(res + 1) = r[1];
+	*(res + 2) = r[2];
 }
 
-void sysidcheck(mjModel* m, mjData* d)
+// roll pitch yaw to w x y z
+void smpl2quat(double *res, double *smpl)
 {
-	static int index = 0;
-	static mjtNum t_init = -0.2;
-	int i, j, k;
+	double rx, ry, rz; // roll pitch yaw
 
-	strcpy(dfilename, dfilepre);
-	strcat(dfilename, "lnrcp001sp001.txt");
-	if ((fop1 = fopen(dfilename, "r")) != NULL)
+	rx = *smpl;
+	ry = *(smpl + 1);
+	rz = *(smpl + 2);
+
+	if (rx > PI) rx = PI - rx;
+
+	Quaterniond q = AngleAxisd(rx, Vector3d::UnitX())
+		* AngleAxisd(ry, Vector3d::UnitY())
+		* AngleAxisd(rz, Vector3d::UnitZ());
+
+	Eigen::Vector4d b = q.coeffs(); // x y z w
+
+	*res = b[3];
+	*(res + 1) = b[0];
+	*(res + 2) = b[1];
+	*(res + 3) = b[2];
+}
+
+int get_nominal(mjModel* m, mjData* d)
+{
+	static int index = 0, i, y;
+	mjtNum temp[4], temp2[4];
+#if STATE_LINEAR == true
+	static int step_max = 1;
+#endif
+
+	mju_zero(d->qpos, m->nq);
+	mju_zero(d->qvel, m->nv);
+	for (y = 0; y < NS / 2; y++)
 	{
-		for (j = 0; j < step_max; j++)
-		{
-			for (k = 0; k < NS; k++)
-			{
-				for (i = 0; i < NS + ctrl_num; i++)
-				{
-					fscanf(fop1, "%s", ctrl_buff);
-					mat[j][k][i] = atof(ctrl_buff);
-				}
-			}
-		}
-		fclose(fop1);
+		d->qpos[y] = state_nominal[index][2 * y];
 	}
-
-	for (i = 0; i < NS + ctrl_num; i++)
+	for (y = 0; y < m->nv; y++)
 	{
-		for (j = 0; j < n_check; j++)
-		{
-			for (k = 0; k < step_max; k++) delta_xc[j][k][i] = ptb_coef * ulim * gaussrand();
-		}
+		d->qvel[y] = state_nominal[index][2 * y + 1];
 	}
-	for (i = 0; i < n_check; i++)
+	for (y = 0; y < ctrl_num; y++)
 	{
-		for (j = 0; j < step_max; j++) mju_mulMatVec(dx[i][j + 1], *mat[j], delta_xc[i][j], NS, NS + ctrl_num);
+		d->ctrl[y] = ctrl_nominal[index * ctrl_num + y];
 	}
-
-	for (i = 0; i < n_check; i++)
+	///quat2smpl(&state_nominal[0][6], &(d->qpos[3]));
+	while (index < step_max)
 	{
-		index = 0;
-		t_init = d->time;
-		for (j = 0; j < m->nq; j++)
-		{
-			d->qpos[j] = delta_xc[i][index][2 * j] + state_nominal[index][2 * j];
-		}
-		for (j = 0; j < m->nv; j++)
-		{
-			d->qvel[j] = delta_xc[i][index][2 * j + 1] + state_nominal[index][2 * j + 1];
-		}
-		for (k = 0; k < ctrl_num; k++)
-		{
-			d->ctrl[k] = delta_xc[i][index][k + NS] + ctrl_nominal[index * ctrl_num + k];
-		}
-		while (index < step_max - 1)
-		{
-			if (d->time - t_init < t_step - 0.00001)
-			{
-				mj_step(m, d);
-			}
-			else {
-				for (int y = 0; y < m->nq; y++)
-				{
-					delta_xcs[i][index][2 * y] = d->qpos[y] - state_nominal[index + 1][2 * y];
-				}
-				for (int y = 0; y < m->nv; y++)
-				{
-					delta_xcs[i][index][2 * y + 1] = d->qvel[y] - state_nominal[index + 1][2 * y + 1];
-				}
+		for (i = 0; i < stepite; i++) mj_step(m, d);
 
-				index++;
-				t_init = d->time;
+		index++;
+		for (y = 0; y < 3; y++)
+		{
+			state_nominal[index][2 * y] = d->qpos[y];
+		}
+		//quat2smpl(temp, &(d->qpos[3]));
+		//smpl2quat(temp2, temp);
+		//for (int k = 0; k < 4; k++)quaterr[index][k] = temp2[k] - d->qpos[3 + k];
+		
+#if defined(EULER)
+		quat2smpl(temp, &(d->qpos[3]));
+		for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = temp[k];
+#elif defined(QUAT)
+		for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = d->qpos[k + 4];
+#endif
 
-				for (int y = 0; y < m->nq; y++)
-				{
-					d->qpos[y] = delta_xc[i][index][2 * y] + state_nominal[index][2 * y];
-				}
-				for (int y = 0; y < m->nv; y++)
-				{
-					d->qvel[y] = delta_xc[i][index][2 * y + 1] + state_nominal[index][2 * y + 1];
-				}
-				for (int ci = 0; ci < ctrl_num; ci++)
-				{
-					d->ctrl[ci] = delta_xc[i][index][ci + NS] + ctrl_nominal[index * ctrl_num + ci];
-				}
-			}
+		for (y = 7; y < m->nq; y++)
+		{
+			state_nominal[index][2 * (y - 1)] = d->qpos[y];
+		}
+		for (y = 0; y < m->nv; y++)
+		{
+			state_nominal[index][2 * y + 1] = d->qvel[y];
+		}
+		for (y = 0; y < ctrl_num; y++)
+		{
+			d->ctrl[y] = ctrl_nominal[index * ctrl_num + y];
 		}
 	}
+	fval_nominal[0] = d->xmat[17];
+	fval_nominal[1] = d->geom_xpos[9];
+	fval_nominal[2] = d->geom_xpos[10];
+	fval_nominal[3] = d->geom_xpos[11];
+	return 1;
+}
 
-	// for result checking
-	strcpy(dfilename, dfilepre);
-	strcat(dfilename, "sysidcheck.txt");
-	if ((fp2 = fopen(dfilename, "wt+")) != NULL)
+mjtNum cost_step(mjModel* m, mjData* d, int index)
+{
+	mjtNum state[NS+1], res0[NS], res1[NS], cost;
+
+	for (int c = 0; c < m->nq; c++)
 	{
-		str = glstr;
-		for (int t = 0; t < NS; t++)
-		{
-			for (int c = 0; c < n_check; c++)
-			{
-				for (int h = 0; h < step_max; h++)
-				{
-					sprintf(str, "%2.4f", delta_xcs[c][h][t]);
-					fwrite(str, 6, 1, fp2);
-					fputs(" ", fp2);
-				}
-			}
-			fputs("\n", fp2);
-			for (int c = 0; c < n_check; c++)
-			{
-				for (int d = 1; d <= step_max; d++)
-				{
-					sprintf(str, "%2.4f", dx[c][d][t]);
-					fwrite(str, 6, 1, fp2);
-					fputs(" ", fp2);
-				}
-			}
-			fputs("\n", fp2);
-			fputs("\n", fp2);
-		}
-		fclose(fp2);
+		state[2 * c] = d->qpos[c];
 	}
+	for (int c = 0; c < m->nv; c++)
+	{
+		state[2 * c + 1] = d->qvel[c];
+	}
+
+#if defined(CARTPOLE)
+	if (state[2] < 0) x_goal[2] = -PI; else x_goal[2] = PI;
+	mju_sub(res0, state, x_goal, NS);
+	if (index >= step_max) mju_mulMatVec(res1, *QTm, res0, NS, NS);
+	else mju_mulMatVec(res1, *Qm, res0, NS, NS);
+	cost = (mju_dot(res0, res1, NS) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+#if defined(CART2POLE)
+	if (state[2] < PI) x_goal[2] = 0; else x_goal[2] = 2 * PI;
+	mju_sub(res0, state, x_goal, NS);
+	if (index >= step_max) mju_mulMatVec(res1, *QTm, res0, NS, NS);
+	else mju_mulMatVec(res1, *Qm, res0, NS, NS);
+	cost = (mju_dot(res0, res1, NS) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+#if defined(PENDULUM)
+	if (state[0] < PI) x_goal[0] = 0; else x_goal[0] = 2 * PI;
+	mju_sub(res0, state, x_goal, NS);
+	if (index >= step_max) mju_mulMatVec(res1, *QTm, res0, NS, NS);
+	else mju_mulMatVec(res1, *Qm, res0, NS, NS);
+	cost = (mju_dot(res0, res1, NS) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+#if defined(ACROBOT)
+	if (state[0] < PI) x_goal[0] = 0; else x_goal[0] = 2 * PI;
+	mju_sub(res0, state, x_goal, NS);
+	if (index >= step_max) mju_mulMatVec(res1, *QTm, res0, NS, NS);
+	else mju_mulMatVec(res1, *Qm, res0, NS, NS);
+	cost = (mju_dot(res0, res1, NS) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+
+#if defined(SWIMMER3)
+	if (index >= step_max) cost = (QT * (1 * (d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + (d->qpos[1] + 0.6) * (d->qpos[1] + 0.6) + 3 * d->qvel[0] * d->qvel[0] + 3 * d->qvel[1] * d->qvel[1]) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+	else cost = (Q * ((1.5 * (d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + 1.5*(d->qpos[1] + 0.6) * (d->qpos[1] + 0.6)) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num)));
+#endif
+#if defined(SWIMMER6)
+	if (index >= step_max) cost = (QT * (1 * (d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + (d->qpos[1] + 0.6) * (d->qpos[1] + 0.6) + 5 * d->qvel[0] * d->qvel[0] + 5 * d->qvel[1] * d->qvel[1]) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+	else cost = (Q * ((1 * (d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + (d->qpos[1] + 0.6) * (d->qpos[1] + 0.6)) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num)));
+#endif
+#if defined(FISH)
+	if (index >= step_max) cost = (QT * (6 * (7 * (d->geom_xpos[11] - d->geom_xpos[5]) * (d->geom_xpos[11] - d->geom_xpos[5]) + 6 * (d->geom_xpos[10] - d->geom_xpos[4]) * (d->geom_xpos[10] - d->geom_xpos[4]) + 3 * (d->geom_xpos[9] - d->geom_xpos[3]) * (d->geom_xpos[9] - d->geom_xpos[3])) + 0.8*(d->xmat[17] - 1) * (d->xmat[17] - 1) + .1*d->qvel[1] * d->qvel[1]) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+	else cost = (Q * (2 * (6 * (d->geom_xpos[11] - d->geom_xpos[5]) * (d->geom_xpos[11] - d->geom_xpos[5]) + 7 * (d->geom_xpos[10] - d->geom_xpos[4]) * (d->geom_xpos[10] - d->geom_xpos[4]) + 3 * (d->geom_xpos[9] - d->geom_xpos[3]) * (d->geom_xpos[9] - d->geom_xpos[3])) + 0.8*(d->xmat[17] - 1) * (d->xmat[17] - 1)) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+#if defined(CHEETAH)
+	if (index >= step_max) cost = (QT*(d->qvel[0] - 3)*(d->qvel[0] - 3) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+	else cost = (Q*(d->qvel[0] - 3) * (d->qvel[0] - 3) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+#if defined(HUMANOID)
+	if (index >= step_max - 1) cost = (QT*((d->subtree_linvel[0] - .2)*(d->subtree_linvel[0] - .2) + (d->xpos[5] - 1) * (d->xpos[5] - 1)) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+	else cost = (Q*((d->subtree_linvel[0] - .2) * (d->subtree_linvel[0] - 1) + (d->xpos[5] - .2) * (d->xpos[5] - 1)) + R * mju_dot(d->ctrl, d->ctrl, ctrl_num));
+#endif
+	return cost;
 }
 
 int setcontrol(mjModel* m, mjData* d)
 {
-	static mjtNum res0[ctrl_num] = { 0 }, res1[NS];
-	static mjtNum state[NS+1];
+	static mjtNum res0[ctrl_num] = { 0 };
+	static mjtNum state[NS], cost = 0;
 	static mjtNum rtctrl[ctrl_num] = { 0 };
 	static int index = 0;
 	static mjtNum t_init = -0.2;
+	mjtNum temp[4];
+	mjtNum temp2[4];
 
 	if (TOP_FLAG == true)
 	{
-		if (d->time - t_init < t_step - 0.000001)
-		{
-			mj_step(m, d);
-		}
-		else {
-			if (t_init < -0.1 && t_init > -0.4)
-			{
-				mju_zero(d->qpos, m->nq);
-				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
-				{
-					d->qpos[y] = state_nominal[0][2 * y];
-				}
-				for (int y = 0; y < m->nv; y++)
-				{
-					d->qvel[y] = state_nominal[0][2 * y + 1];
-				}
-			}
-			for (int y = 0; y < m->nq; y++)
-			{
-				state[2 * y] = d->qpos[y] - x_goal[2 * y];
-			}
-#if defined (PENDULUM)
-			state[0] = (PI - fabs(d->qpos[0] - PI))*((PI - d->qpos[0] > 0) - (PI - d->qpos[0] < 0));
-#endif
-#if defined (CARTPOLE)
-			state[2] = (PI - fabs(d->qpos[1]))*((d->qpos[1] < 0) - (d->qpos[1] > 0));
-#endif
-			for (int y = 0; y < m->nv; y++)
-			{
-				state[2 * y + 1] = d->qvel[y] - x_goal[2 * y + 1];
-			}
-
-			mju_mulMatVec(res0, K, state, ctrl_num, NS);
-			for (int ci = 0; ci < ctrl_num; ci++)
-			{
-				d->ctrl[ci] = -res0[ci];// +ptb_coef * ulim * gaussrand();
-			}
-			t_init = d->time;
-		}
+		mju_zero(d->ctrl, m->nu);
+		mj_step(m, d);
 	}else {
-		if (d->time - t_init < t_step - 0.000001)
+		if (d->time - t_init < t_step - 0.0000001)
 		{
 			mj_step(m, d);
 		}
 		else {
 			if (t_init < -0.1)
 			{
-				mju_zero(d->qpos, m->nq);
+				/*mju_zero(d->qpos, m->nq);
 				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
+				mju_zero(d->ctrl, m->nu);*/
+				for (int y = 0; y < NS/2; y++)
 				{
 					d->qpos[y] = state_nominal[0][2 * y];
 					state_closedlp[0][2 * y] = state_nominal[0][2 * y];
@@ -1374,21 +1315,45 @@ int setcontrol(mjModel* m, mjData* d)
 					d->qvel[y] = state_nominal[0][2 * y + 1];
 					state_closedlp[0][2 * y + 1] = state_nominal[0][2 * y + 1];
 				}
+				cost += cost_step(m, d, 0);
 				for (int ci = 0; ci < ctrl_num; ci++)
 				{
 					d->ctrl[ci] = ctrl_nominal[0 * ctrl_num + ci] +delta_u[0 * ctrl_num + ci];
 				}
 			}
 			else {
-				index++;			
-				state_geomclp[index][0] = d->geom_xpos[6] - 0.6;
-				state_geomclp[index][1] = d->geom_xpos[7] + 0.6;
-				for (int y = 0; y < m->nq; y++)
+				index++;
+				cost += cost_step(m, d, index);
+
+				quat2smpl(temp, &(d->qpos[3]));
+				for (int k = 0; k < 3; k++) temp[k] += 0.01 * ulim * gaussrand();
+				smpl2quat(temp2, temp);
+				for (int k = 0; k < 4; k++)quaterr[index][k] = temp2[k] - d->qpos[3 + k];
+				for (int i = 0; i < 4; i++) quat[index][i] = d->qpos[3 + i];
+
+				for (int y = 0; y < 3; y++)
 				{
 					state[2 * y] = d->qpos[y] - state_nominal[index][2 * y];
 					state_closedlp[index][2 * y] = d->qpos[y];
 				}
+				
+				quat2smpl(temp, &(d->qpos[3]));
 
+				for (int k = 0; k < 3; k++)
+				{
+#if defined(EULER)
+					state[2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+					state_closedlp[index][2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+#elif defined(QUAT)
+					state[2 * k + 6] = d->qpos[k + 4] - state_nominal[index][2 * k + 6];
+					state_closedlp[index][2 * k + 6] = d->qpos[k + 4] - state_nominal[index][2 * k + 6];
+#endif
+				}
+				for (int y = 7; y < m->nq; y++)
+				{
+					state[2 * (y - 1)] = d->qpos[y] - state_nominal[index][2 * (y - 1)];
+					state_closedlp[index][2 * (y - 1)] = d->qpos[y];
+				}
 				for (int y = 0; y < m->nv; y++)
 				{
 					state[2 * y + 1] = d->qvel[y] - state_nominal[index][2 * y + 1];
@@ -1396,24 +1361,27 @@ int setcontrol(mjModel* m, mjData* d)
 				}
 				if (index < step_max) {
 					mju_mulMatVec(res0, *TK[index], state, ctrl_num, NS);
-					/*if (res0[0] > 20) res0[0] = 20;
-					if (res0[1] > 20) res0[1] = 20;
-					if (res0[0] < -20) res0[0] = -20;
-					if (res0[1] < -20) res0[1] = -20;*/
 					for (int ci = 0; ci < ctrl_num; ci++)
 					{
-						d->ctrl[ci] = ctrl_nominal[index * ctrl_num + ci] - res0[ci] + delta_u[index * ctrl_num + ci];
+						d->ctrl[ci] = ctrl_nominal[index * ctrl_num + ci] + delta_u[index * ctrl_num + ci] -res0[ci];
+						control[index][ci] = res0[ci];
 					}
 				}
 				else {
+					Jcl = cost;
+					cost = 0;
 					mju_zero(d->ctrl, m->nu);
 					t_init = -0.5;
 					TOP_FLAG = true;
-					if (FINALCOST || ERRCOMPARE)
+					if (FINALCOST || ERRCOMPARE || CLOPCOMPARE)
 					{
 						TOP_FLAG = false;
 						index = 0;
 					}
+					fval_closedlp[0] = d->xmat[17];
+					fval_closedlp[1] = d->geom_xpos[9];
+					fval_closedlp[2] = d->geom_xpos[10];
+					fval_closedlp[3] = d->geom_xpos[11];
 					return 1;
 				}
 			}
@@ -1426,52 +1394,16 @@ int setcontrol(mjModel* m, mjData* d)
 int setcontrol1(mjModel* m, mjData* d)
 {
 	static mjtNum res0[NS], res1[NS];
-	static mjtNum state[NS+1];
+	static mjtNum state[NS+1], cost = 0;
 	static mjtNum rtctrl[ctrl_num] = { 0 };
 	static mjtNum t_init = -0.2;
 	static int index = 0;
+	mjtNum temp[4];
 
     if (TOP_FLAG == true)
 	{
-		if (d->time - t_init < t_step - 0.000001)
-		{
-			mj_step(m, d);
-		}
-		else {
-			if (t_init < -0.1 && t_init > -0.4)
-			{
-				mju_zero(d->qpos, m->nq);
-				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
-				{
-					d->qpos[y] = state_nominal[0][2 * y];
-				}
-				for (int y = 0; y < m->nv; y++)
-				{
-					d->qvel[y] = state_nominal[0][2 * y + 1];
-				}
-			}
-			for (int y = 0; y < m->nq; y++)
-			{
-				state[2 * y] = d->qpos[y] - x_goal[2 * y];
-			}
-#if defined (PENDULUM)
-			state[0] = (PI - fabs(d->qpos[0] - PI))*((PI - d->qpos[0] > 0) - (PI - d->qpos[0] < 0));
-#endif
-#if defined (CARTPOLE)
-			state[2] = (PI - fabs(d->qpos[1]))*((d->qpos[1] < 0) - (d->qpos[1] > 0));
-#endif
-			for (int y = 0; y < m->nv; y++)
-			{
-				state[2 * y + 1] = d->qvel[y] - x_goal[2 * y + 1];
-			}
-			mju_mulMatVec(res0, K, state, ctrl_num, NS);
-			for (int ci = 0; ci < ctrl_num; ci++)
-			{
-				d->ctrl[ci] = -res0[ci];
-			}
-			t_init = d->time;
-		}
+		mju_zero(d->ctrl, m->nu);
+		mj_step(m, d);
 	}
 	else {
 		if (d->time - t_init < t_step - 0.000001)
@@ -1483,7 +1415,8 @@ int setcontrol1(mjModel* m, mjData* d)
 			{
 				mju_zero(d->qpos, m->nq);
 				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
+				mju_zero(d->ctrl, m->nu);
+				for (int y = 0; y < NS/2; y++)
 				{
 					d->qpos[y] = state_nominal[0][2 * y];
 				}
@@ -1491,6 +1424,7 @@ int setcontrol1(mjModel* m, mjData* d)
 				{
 					d->qvel[y] = state_nominal[0][2 * y + 1];
 				}				  
+				cost += cost_step(m, d, 0);
 				for (int ci = 0; ci < ctrl_num; ci++)
 				{
 					d->ctrl[ci] = ctrl_nominal[0 * ctrl_num + ci] +delta_u[0 * ctrl_num + ci];
@@ -1498,12 +1432,24 @@ int setcontrol1(mjModel* m, mjData* d)
 			}
 			else {
 				index++;
-
+				cost += cost_step(m, d, index);
+#if defined(FISH)
+				for (int y = 0; y < 3; y++)
+				{
+					state_openlp[index][2 * y] = d->qpos[y];
+				}
+				quat2smpl(temp, &(d->qpos[3]));
+				for (int k = 0; k < 3; k++) state_openlp[index][2 * k + 6] = temp[k];
+				for (int y = 7; y < m->nq; y++)
+				{
+					state_openlp[index][2 * (y-1)] = d->qpos[y];
+				}
+#else
 				for (int y = 0; y < m->nq; y++)
 				{
 					state_openlp[index][2 * y] = d->qpos[y];
 				}
-
+#endif
 				for (int y = 0; y < m->nv; y++)
 				{
 					state_openlp[index][2 * y + 1] = d->qvel[y];
@@ -1515,14 +1461,20 @@ int setcontrol1(mjModel* m, mjData* d)
 					}
 				}
 				else {
+					Jop = cost;
+					cost = 0;
 					mju_zero(d->ctrl, m->nu);
 					t_init = -0.5;
 					TOP_FLAG = true;
-					if (ERRCOMPARE == true)
+					if (ERRCOMPARE || CLOPCOMPARE)
 					{
 						TOP_FLAG = false;
 						index = 0;
 					}
+					fval_openlp[0] = d->xmat[17];
+					fval_openlp[1] = d->geom_xpos[9];
+					fval_openlp[2] = d->geom_xpos[10];
+					fval_openlp[3] = d->geom_xpos[11];
 					return 1;
 				}
 			}
@@ -1542,45 +1494,8 @@ int setcontrol2(mjModel* m, mjData* d)
 
 	if (TOP_FLAG == true)
 	{
-		if (d->time - t_init < t_step - 0.000001)
-		{
-			mj_step(m, d);
-		}
-		else {
-			if (t_init < -0.1 && t_init > -0.4)
-			{
-				mju_zero(d->qpos, m->nq);
-				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
-				{
-					d->qpos[y] = state_nominal[0][2 * y];
-				}
-				for (int y = 0; y < m->nv; y++)
-				{
-					d->qvel[y] = state_nominal[0][2 * y + 1];
-				}
-			}
-			for (int y = 0; y < m->nq; y++)
-			{
-				state[2 * y] = d->qpos[y] - x_goal[2 * y];
-			}
-#if defined (PENDULUM)
-			state[0] = (PI - fabs(d->qpos[0] - PI))*((PI - d->qpos[0] > 0) - (PI - d->qpos[0] < 0));
-#endif
-#if defined (CARTPOLE)
-			state[2] = (PI - fabs(d->qpos[1]))*((d->qpos[1] < 0) - (d->qpos[1] > 0));
-#endif
-			for (int y = 0; y < m->nv; y++)
-			{
-				state[2 * y + 1] = d->qvel[y] - x_goal[2 * y + 1];
-			}
-			mju_mulMatVec(res0, K, state, ctrl_num, NS);
-			for (int ci = 0; ci < ctrl_num; ci++)
-			{
-				d->ctrl[ci] = -res0[ci];
-			}
-			t_init = d->time;
-		}
+		mju_zero(d->ctrl, m->nu);
+		mj_step(m, d);
 	}
 	else {
 		if (d->time - t_init < t_step - 0.000001)
@@ -1592,7 +1507,8 @@ int setcontrol2(mjModel* m, mjData* d)
 			{
 				mju_zero(d->qpos, m->nq);
 				mju_zero(d->qvel, m->nv);
-				for (int y = 0; y < m->nq; y++)
+				mju_zero(d->ctrl, m->nu);
+				for (int y = 0; y < NS/2; y++)
 				{
 					d->qpos[y] = state_nominal[0][2 * y];
 				}
@@ -1628,20 +1544,21 @@ int setcontrol2(mjModel* m, mjData* d)
 
 mjtNum fcost(mjModel* m, mjData* d, mjtNum ptb)
 {
-	const int totalstep = step_max;
+	const int totalstep = step_max;//1600
 	int index = 0, i, y;
 	mjtNum res0[ctrl_num] = { 0 }, state[NS];
 	mjtNum sum = 0;
+	mjtNum temp[4];
 
 	mju_zero(d->qpos, m->nq);
 	mju_zero(d->qvel, m->nv);
-	for (y = 0; y < m->nq; y++)
+	for (int y = 0; y < NS / 2; y++)
 	{
-		d->qpos[y] = state_nominal[index][2 * y];
+		d->qpos[y] = state_nominal[0][2 * y];
 	}
-	for (y = 0; y < m->nv; y++)
+	for (int y = 0; y < m->nv; y++)
 	{
-		d->qvel[y] = state_nominal[index][2 * y + 1];
+		d->qvel[y] = state_nominal[0][2 * y + 1];
 	}
 	for (y = 0; y < ctrl_num; y++)
 	{
@@ -1652,18 +1569,42 @@ mjtNum fcost(mjModel* m, mjData* d, mjtNum ptb)
 	{
 		for (i = 0; i < stepite; i++) mj_step(m, d);
 		index++;
-		for (y = 0; y < m->nq; y++)
+#if defined(FISH)
+		for (int y = 0; y < 3; y++)
 		{
 			state[2 * y] = d->qpos[y] - state_nominal[index][2 * y];
 		}
-		for (y = 0; y < m->nv; y++)
+
+		//quat2smpl(temp, &(d->qpos[3]));
+
+		for (int k = 0; k < 3; k++)
+		{
+			state[2 * k + 6] = d->qpos[k + 4] - state_nominal[index][2 * k + 6];
+			state_closedlp[index][2 * k + 6] = d->qpos[k + 4] - state_nominal[index][2 * k + 6];
+
+			//state[2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+			//state_closedlp[index][2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+		}
+		for (int y = 7; y < m->nq; y++)
+		{
+			state[2 * (y - 1)] = d->qpos[y] - state_nominal[index][2 * (y - 1)];
+		}
+#else 
+		for (int y = 0; y < m->nq; y++)
+		{
+			state[2 * y] = d->qpos[y] - state_nominal[index][2 * y];
+			state_closedlp[index][2 * y] = d->qpos[y];
+		}
+#endif
+		for (int y = 0; y < m->nv; y++)
 		{
 			state[2 * y + 1] = d->qvel[y] - state_nominal[index][2 * y + 1];
 		}
+
 		mju_mulMatVec(res0, *TK[index], state, ctrl_num, NS);
 		for (int ci = 0; ci < ctrl_num; ci++)
 		{
-			d->ctrl[ci] = ctrl_nominal[index * ctrl_num + ci] - res0[ci] + ptb * ulim * gaussrand();
+			d->ctrl[ci] = ctrl_nominal[index * ctrl_num + ci] + ptb * ulim * gaussrand() -res0[ci];
 		}
 	}
 	// lqr stabilizer: final step + stabilization steps = 1 + totalstep - step_max
@@ -1671,7 +1612,7 @@ mjtNum fcost(mjModel* m, mjData* d, mjtNum ptb)
 	{
 		for (i = 0; i < stepite; i++) mj_step(m, d);
 		index++;
-		for (y = 0; y < m->nq; y++)
+		for (y = 0; y < NS/2; y++)
 		{
 			state[2 * y] = d->qpos[y] - x_goal[2 * y];
 		}
@@ -1679,25 +1620,15 @@ mjtNum fcost(mjModel* m, mjData* d, mjtNum ptb)
 		{
 			state[2 * y + 1] = d->qvel[y] - x_goal[2 * y + 1];
 		}
-#if defined (PENDULUM)
-		state[0] = (PI - fabs(d->qpos[0] - PI))*((PI - d->qpos[0] > 0) - (PI - d->qpos[0] < 0));
-		//sum += 700 * state[0] * state[0] + 700 * state[1] * state[1];
-		sum += sqrt(state[0] * state[0] + state[1] * state[1]);
-#elif defined (CARTPOLE)
-		state[2] = (PI - fabs(d->qpos[1]))*((d->qpos[1] < 0) - (d->qpos[1] > 0));
-		//sum += 200 * state[0] * state[0] + 100 * state[1] * state[1] + 500 * state[2] * state[2] + 100 * state[3] * state[3];
-		sum += sqrt(state[0] * state[0] + state[1] * state[1] + state[2] * state[2] + state[3] * state[3]);
-#elif defined (SWIMMER3)
-		//sum += 200*(d->geom_xpos[6] - 0.6) * (d->geom_xpos[6] - 0.6) + 100*(d->geom_xpos[7] + 0.6) * (d->geom_xpos[7] + 0.6);
-		sum += sqrt((d->geom_xpos[6] - 0.6) * (d->geom_xpos[6] - 0.6) + (d->geom_xpos[7] + 0.6) * (d->geom_xpos[7] + 0.6));
-#elif defined (SWIMMER6)
+#if defined (FISH)
 		//sum += 200*(d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + 200*(d->qpos[1] + 0.6) * (d->qpos[1] + 0.6) + 1000*d->qvel[0] * d->qvel[0] + 1000*d->qvel[1] * d->qvel[1];
-		sum += sqrt((d->qpos[0] - 0.6) * (d->qpos[0] - 0.6) + (d->qpos[1] + 0.6) * (d->qpos[1] + 0.6) + d->qvel[0] * d->qvel[0] + d->qvel[1] * d->qvel[1]);
+		//sum += sqrt((d->geom_xpos[11] - d->geom_xpos[5]) * (d->geom_xpos[11] - d->geom_xpos[5]) + (d->geom_xpos[10] - d->geom_xpos[4]) * (d->geom_xpos[10] - d->geom_xpos[4]) + (d->geom_xpos[9] - d->geom_xpos[3]) * (d->geom_xpos[9] - d->geom_xpos[3]) + (d->xmat[17] - 1) * (d->xmat[17] - 1));
+		sum += sqrt((d->geom_xpos[11] - d->geom_xpos[5]) * (d->geom_xpos[11] - d->geom_xpos[5]) + (d->geom_xpos[10] - d->geom_xpos[4]) * (d->geom_xpos[10] - d->geom_xpos[4]) + (d->geom_xpos[9] - d->geom_xpos[3]) * (d->geom_xpos[9] - d->geom_xpos[3]));
 #endif
-		mju_mulMatVec(res0, K, state, ctrl_num, NS);
+		//mju_mulMatVec(res0, K, state, ctrl_num, NS);
 		for (int ci = 0; ci < ctrl_num; ci++)
 		{
-			d->ctrl[ci] = -res0[ci] + ptb * ulim * gaussrand();
+			//d->ctrl[ci] = -res0[ci] + ptb * ulim * gaussrand();
 		}
 	}
 	return sum / (totalstep - step_max + 1.0);
@@ -1709,7 +1640,7 @@ void perfcheck()
 	strcat(dfilename, "perfcheck.txt");
 	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
 	{
-		for (mjtNum ptb = 0; ptb < 0.3001; ptb += 0.05)
+		for (mjtNum ptb = 0; ptb <= 1.0001; ptb += 0.05)
 		{
 			for (int i = 0; i < n_check; i++)
 			{
@@ -1725,9 +1656,39 @@ void perfcheck()
 	}
 }
 
+void clopcompare()
+{
+	strcpy(dfilename, dfilepre);
+	strcat(dfilename, "clopdata.txt");
+	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
+	{
+		for (double ptb = 0; ptb <= 0.60001; ptb += 0.05)
+		{
+			for (int i = 0; i < n_check; i++)
+			{
+				for (int e = 0; e < step_max * ctrl_num; e++)
+				{
+					delta_u[e] = ptb * ulim * gaussrand();
+				}
+				while (setcontrol(m, d) != 1);
+				while (setcontrol1(m1, d1) != 1);
+
+				str3 = glstr;
+				sprintf(str3, "%4.8f", Jcl);
+				fwrite(str3, 10, 1, fp1);
+				fputs("\n", fp1);
+				sprintf(str3, "%4.8f", Jop);
+				fwrite(str3, 10, 1, fp1);
+				fputs("\n", fp1);
+			}
+		}
+		fclose(fp1);
+	}
+}
+
 void finalcost()
 {
-	mjtNum fcost = 0, res0[NS];
+	mjtNum fcost = 0, res0[ctrl_num] = { 0 };
 
 	strcpy(dfilename, dfilepre);
 	strcat(dfilename, "finalcost.txt");
@@ -1742,47 +1703,6 @@ void finalcost()
 					delta_u[e] = ptb * ulim * gaussrand();
 				}
 				while (setcontrol(m, d) != 1);
-
-#if defined(CARTPOLE)
-				for (int i = 0; i < step_max - 1; i++)
-				{
-					if (state_closedlp[i][2] < 0) x_goal[2] = -PI; else x_goal[2] = PI;
-					mju_sub(res0, state_closedlp[i], x_goal, NS);
-					fcost += 0 * res0[0] * res0[0] + 0 * res0[1] * res0[1] + 0 * res0[2] * res0[2] + 0 * res0[3] * res0[3];
-				}
-				mju_sub(res0, state_closedlp[step_max-1], x_goal, NS);
-				fcost += 200 * res0[0] * res0[0] + 100 * res0[1] * res0[1] + 500 * res0[2] * res0[2] + 100 * res0[3] * res0[3];
-				//if (state_closedlp[step_max][2] < 0) x_goal[2] = -PI; else x_goal[2] = PI;
-				//mju_sub(res0, state_closedlp[step_max], x_goal, NS);
-				//fcost = 480 * res0[0] * res0[0] + 240 * res0[1] * res0[1] + 720 * res0[2] * res0[2] + 240 * res0[3] * res0[3];
-#elif defined(PENDULUM)
-				for (int i = 1; i < step_max; i++)
-				{
-					if (state_closedlp[i][0] < PI) x_goal[0] = 0; else x_goal[0] = 2 * PI;
-					mju_sub(res0, state_closedlp[i], x_goal, NS);
-					fcost += 0 * res0[0] * res0[0] + 0 * res0[1] * res0[1];
-				}
-				if (state_closedlp[step_max][0] < PI) x_goal[0] = 0; else x_goal[0] = 2 * PI;
-				mju_sub(res0, state_closedlp[step_max], x_goal, NS);
-				fcost += 700 * mju_dot(res0, res0, NS) + 0.00001 * mju_dot(d->ctrl, d->ctrl, ctrl_num);
-#elif defined(SWIMMER3)
-				/*for (int i = 1; i < step_max; i++)
-				{
-					fcost += 16 * state_geomclp[i][0] * state_geomclp[i][0] + 8 * state_geomclp[i][1] * state_geomclp[i][1];
-				}
-				fcost += 200 * state_geomclp[step_max][0] * state_geomclp[step_max][0] + 100 * state_geomclp[step_max][1] * state_geomclp[step_max][1] + 0.0001 * mju_dot(d->ctrl, d->ctrl, ctrl_num);*/
-				for (int i = 1; i < step_max; i++)
-				{
-					fcost += 2.5 * (state_closedlp[i][0] - 0.6) * (state_closedlp[i][0] - 0.6) + 2.5 * (state_closedlp[i][2] + 0.6) * (state_closedlp[i][2] + 0.6);
-				}
-				fcost += 2000 * (state_closedlp[step_max][0] - 0.6) * (state_closedlp[step_max][0] - 0.6) + 2000 * (state_closedlp[step_max][2] + 0.6) * (state_closedlp[step_max][2] + 0.6) + 6000 * state_closedlp[step_max][1] * state_closedlp[step_max][1] + 6000 * state_closedlp[step_max][3] * state_closedlp[step_max][3] + 0.001 * mju_dot(d->ctrl, d->ctrl, ctrl_num);
-#elif defined(SWIMMER6)
-				for (int i = 1; i < step_max; i++)
-				{
-					fcost += 2 * (state_closedlp[i][0] - 0.6) * (state_closedlp[i][0] - 0.6) + 2*(state_closedlp[i][2] + 0.6) * (state_closedlp[i][2] + 0.6);
-				}
-				fcost += 200 * (state_closedlp[step_max][0] - 0.6) * (state_closedlp[step_max][0] - 0.6) + 200 * (state_closedlp[step_max][2] + 0.6) * (state_closedlp[step_max][2] + 0.6) + 1000 * state_closedlp[step_max][1] * state_closedlp[step_max][1]+ 1000 * state_closedlp[step_max][3] * state_closedlp[step_max][3] + 0.001 * mju_dot(d->ctrl, d->ctrl, ctrl_num);
-#endif
 
 				// option: data output for checking
 				str3 = glstr;
@@ -1802,9 +1722,9 @@ void errcompare()
 	static int count[10] = { 0 };
 	static int k;
 
-	for (double ptb = .1; ptb <= 2.00001; ptb += 0.1)
+	for (double ptb = .05; ptb <= 1.00001; ptb += 0.05)
 	{
-		k = (int)(10 * ptb);
+		k = (int)(20 * ptb);
 		strcpy(dfilename, dfilepre);
 		strcat(dfilename, "errdata.txt");
 		for (int i = 0; i < n_check; i++)
@@ -1820,29 +1740,16 @@ void errcompare()
 			if ((fp1 = fopen(dfilename, "at+")) != NULL)
 			{
 				str3 = glstr;
-				for (int h = 0; h < NS; h++)
+				for (int h = 0; h < 4; h++)
 				{
-					for (int d = 1; d < step_max; d++)
-					{
-						sprintf(str3, "%4.8f", state_nominal[d][h]);
-						fwrite(str3, 10, 1, fp1);
-						fputs(" ", fp1);
-					}
+					sprintf(str3, "%4.8f", fval_nominal[h]);
+					fwrite(str3, 10, 1, fp1);
 					fputs("\n", fp1);
-					for (int d = 1; d < step_max; d++)
-					{
-						sprintf(str3, "%4.8f", state_closedlp[d][h]);
-						fwrite(str3, 10, 1, fp1);
-						fputs(" ", fp1);
-					}
+					sprintf(str3, "%4.8f", fval_closedlp[h]);
+					fwrite(str3, 10, 1, fp1);
 					fputs("\n", fp1);
-					for (int d = 1; d < step_max; d++)
-					{
-						sprintf(str3, "%4.8f", state_openlp[d][h]);
-						fwrite(str3, 10, 1, fp1);
-						fputs(" ", fp1);
-					}
-					fputs("\n", fp1);
+					sprintf(str3, "%4.8f", fval_openlp[h]);
+					fwrite(str3, 10, 1, fp1);
 					fputs("\n", fp1);
 				}
 				fclose(fp1);
@@ -2467,7 +2374,7 @@ void render2(GLFWwindow* window)
 		solerr = mju_log10(mju_max(mjMINVAL, solerr));
 
 		// status
-		sprintf(status, "%-20.1f\n%d  (%d con)\n%.3f\n%.0f\n%.2f\n%.1f  (%d it)\n%.1f %.1f\n%s\n%f\n%f\n%d",
+		sprintf(status, "%-20.1f\n%d  (%d con)\n%.3f\n%.0f\n%.2f\n%.1f  (%d it)\n%.1f %.1f\n%s\n%f\n%f\n%f",
 			d2->time,
 			d2->nefc,
 			d2->ncon,
@@ -2481,9 +2388,9 @@ void render2(GLFWwindow* window)
 			camstr,
 			//mjFRAMESTRING[vopt.frame],
 			d2->qpos[0],
-			d2->qpos[1],
+			d2->qpos[10],
 			//mjLABELSTRING[vopt.label],
-			tri_num
+			d2->qpos[12]
 		);
 	}
 
@@ -2606,7 +2513,7 @@ void render2(GLFWwindow* window)
 
 //-------------------------------- main function ----------------------------------------
 
-int wWinMain(int argc, const char** argv)
+int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
 {
 	mjtNum csum = 0;
 
@@ -2616,33 +2523,30 @@ int wWinMain(int argc, const char** argv)
 		mju_error("Headers and library have different versions");
 
 	// activate MuJoCo license
-	strcpy(kfilename, kfilepre);
-	strcat(kfilename, "mjkeybig.txt");
-	mj_activate(kfilename);
-
+	DWORD pcsize = 30;
+	GetUserName(pcname, &pcsize);
+	if (pcname[0] == 'R') {
+		strcpy(kfilename, kfilepre);
+		strcat(kfilename, "mjkeybig.txt");
+		mj_activate(kfilename);
+	}
+	else if (pcname[0] == '5') {
+		strcpy(kfilename, kfilepre);
+		strcat(kfilename, "mjkeysmall.txt");
+		mj_activate(kfilename);
+	}
+	
 	// load model
 	char error[1000] = "Could not load binary model";
 	strcpy(mfilename, mfilepre);
 	strcat(mfilename, mname);
-	m = mj_loadXML(mfilename, 0, error, 1000);
-	if (!m)
-		return finish(error);
-
+	m = mj_loadXML(mfilename, 0, error, 1000); 
+	if (!m) return finish(error);
 	// make data
 	d = mj_makeData(m);
-	if (!d)
-		return finish("Could not allocate mjData", m);
-
-	if (TOP_FLAG == true)
-	{
-		#if defined(PENDULUM)
-				state_nominal[0][0] = 2 * PI + ptb_coef * ulim * gaussrand();
-		#elif defined(CARTPOLE)
-				state_nominal[0][2] = -PI + ptb_coef * ulim * gaussrand();
-		#endif
-	}
-
-	strcpy(dfilename, dfilepre);
+	if (!d) return finish("Could not allocate mjData", m);
+	
+	strcpy(dfilename, dfilepre); 
 	strcat(dfilename, "result.txt");
 	if ((fp = fopen(dfilename, "r")) != NULL)
 	{
@@ -2669,9 +2573,8 @@ int wWinMain(int argc, const char** argv)
 		}
 		fclose(fp);
 	}
-
 	strcpy(dfilename, dfilepre);
-	strcat(dfilename, "TK.txt");
+	strcat(dfilename, "TK.txt"); 
 	if ((fop = fopen(dfilename, "r")) != NULL)
 	{
 		for (int i1 = 0; i1 < step_max; i1++) {
@@ -2685,6 +2588,38 @@ int wWinMain(int argc, const char** argv)
 		fclose(fop);
 	}
 
+	strcpy(dfilename, dfilepre);
+	strcat(dfilename, "parameters.txt");
+	if ((fop2 = fopen(dfilename, "r")) != NULL) {
+		while (!feof(fop2))
+		{
+			fscanf(fop2, "%s", para_buff);
+			if (para_buff[1] == '_')
+			{
+				fscanf(fop2, "%s", para_buff);
+				Q = atof(para_buff);
+			}
+			if (para_buff[0] == 'R')
+			{
+				fscanf(fop2, "%s", para_buff);
+				R = atof(para_buff);
+			}
+			if (para_buff[1] == 'T')
+			{
+				fscanf(fop2, "%s", para_buff);
+				QT = atof(para_buff);
+			}
+		}
+		for (int ns = 0; ns < NS; ns++)
+		{
+			QTm[ns][ns] = 1 * QT;
+			Qm[ns][ns] = 1 * Q;
+		}
+		//cartpole special and incremental = 0
+		//QTm[0][0] = 200; QTm[1][1] = 100; QTm[2][2] = 500; QTm[3][3] = 100;
+		fclose(fop2);
+	}
+
 	srand((unsigned)time(NULL));
 	for (int e = 0; e < step_max * ctrl_num; e++)
 	{
@@ -2695,7 +2630,7 @@ int wWinMain(int argc, const char** argv)
 
 	if (SYSIDCHECK == true)
 	{
-		sysidcheck(m, d);
+		//sysidcheck(m, d);
 		return 0;
 	}
 
@@ -2708,6 +2643,17 @@ int wWinMain(int argc, const char** argv)
 	if (FINALCOST == true)
 	{
 		finalcost();
+		return 0;
+	}
+
+	if (CLOPCOMPARE == true)
+	{
+		m1 = mj_loadXML(mfilename, 0, error, 1000);
+		if (!m1) return finish(error);
+
+		d1 = mj_makeData(m1);
+		if (!d1) return finish("Could not allocate mjData", m1);
+		clopcompare();
 		return 0;
 	}
 
@@ -2826,14 +2772,14 @@ int wWinMain(int argc, const char** argv)
 	// option: output data for checking
 	strcpy(dfilename, dfilepre);
 	strcat(dfilename, "states.txt");
-	if ((fp1 = fopen(dfilename, "at+")) != NULL)
+	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
 	{
 		str3 = glstr;
-		for (int h = 0; h < NS; h++)
+		for (int h = 6; h < 12; h+=2)
 		{
 			for (int d = 0; d <= step_max; d++)
 			{
-				sprintf(str3, "%4.16f", state_nominal[d][h]);
+				sprintf(str3, "%4.16f", state_closedlp[d][h]);
 				fwrite(str3, 18, 1, fp1);
 				fputs(" ", fp1);
 			}
@@ -2854,6 +2800,58 @@ int wWinMain(int argc, const char** argv)
 			fputs("\n", fp1);
 			fputs("\n", fp1);*/
 		}
+		fclose(fp1);
+	}
+	strcpy(dfilename, dfilepre);
+	strcat(dfilename, "quats.txt");
+	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
+	{
+		str3 = glstr;
+		for (int h = 0; h < 4; h++)
+		{
+			for (int d = 0; d <= step_max; d++)
+			{
+				sprintf(str3, "%4.16f", quat[d][h]);
+				fwrite(str3, 18, 1, fp1);
+				fputs(" ", fp1);
+			}
+			fputs("\n", fp1);
+		}
+		fclose(fp1);
+	}
+	strcpy(dfilename, dfilepre);
+	strcat(dfilename, "ctrls.txt");
+	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
+	{
+		str3 = glstr;
+		for (int h = 0; h < ctrl_num; h++)
+		{
+			for (int d = 0; d <= step_max; d++)
+			{
+				sprintf(str3, "%4.16f", control[d][h]);
+				fwrite(str3, 18, 1, fp1);
+				fputs(" ", fp1);
+			}
+			fputs("\n", fp1);
+		}
+		fclose(fp1);
+	}
+	strcpy(dfilename, dfilepre);
+	strcat(dfilename, "quaterr.txt");
+	if ((fp1 = fopen(dfilename, "wt+")) != NULL)
+	{
+		str3 = glstr;
+		for (int h = 0; h < 4; h++)
+		{
+			for (int d = 0; d <= step_max; d++)
+			{
+				sprintf(str3, "%4.16f", quaterr[d][h]);
+				fwrite(str3, 18, 1, fp1);
+				fputs(" ", fp1);
+			}
+			fputs("\n", fp1);
+		}
+		fclose(fp1);
 	}
 
 	// delete everything we allocated

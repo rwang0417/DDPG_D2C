@@ -7,6 +7,7 @@
 //  added the D2C testing code     //
 //---------------------------------//
 
+
 #include "mujoco.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,12 +15,16 @@
 #include <chrono>
 #include <math.h> 
 #include <time.h>
+#include <Eigen/Geometry>
 
 using namespace std;
+using namespace Eigen;
 //-------------------------------- macro variables --------------------------------------
 
-// model selection: PENDULUM CARTPOLE SWIMMER3 SWIMMER6
-#define SWIMMER6
+// model selection: FISH
+// EULER QUAT
+#define FISH
+#define EULER
 #define CTRL_LIMITTED false
 #define STATE_LINEAR false
 #define LOCAL true
@@ -28,46 +33,16 @@ using namespace std;
 //-------------------------------- global variables -------------------------------------
 
 // user customized parameters
-#if defined(SWIMMER6)
-const mjtNum t_step = 0.006;//0.01;0.01;900
-const mjtNum cal_step = 0.006;
-const mjtNum ptb_coef = 0.008;
-const int step_max = 1500;
-const int32_t roll_max = 1400;
-const char* mname = "swimmer6.xml";
-const int ctrl_num = 5;
-const int NS = 16;
-mjtNum state_nominal[step_max + 1][NS] = { 0 };
-#elif defined(SWIMMER3)
-const mjtNum t_step = 0.005;//0.01;0.01;800
-const mjtNum cal_step = 0.005;
-const mjtNum ptb_coef = 0.006;
-const int step_max = 1600;
-const int32_t roll_max = 3000;
-const char* mname = "swimmer3.xml";
-const int ctrl_num = 2;
-const int NS = 10;
-mjtNum state_nominal[step_max + 1][NS] = { 0 };
-#elif defined(PENDULUM)
-const mjtNum t_step = 0.1;
-const mjtNum cal_step = 0.1;
-mjtNum ptb_coef = 0.005;
-const int step_max = 30;
-const int32_t roll_max = 500;
-const char* mname = "pendulum.xml";
-const int ctrl_num = 1;
-const int NS = 2;
-mjtNum state_nominal[step_max + 1][NS] = { PI, 0.0 };
-#elif defined(CARTPOLE)
-const mjtNum t_step = 0.1;
-const mjtNum cal_step = 0.1;
-mjtNum ptb_coef = 0.001;
-const int step_max = 30;
-const int32_t roll_max = 600;
-const char* mname = "cartpole.xml";
-const int ctrl_num = 1;
-const int NS = 4;
-mjtNum state_nominal[step_max + 1][NS] = { 0, 0, 0, 0.0 };
+#if defined(FISH)
+const mjtNum t_step = 0.002;
+const mjtNum cal_step = 0.002;
+const mjtNum ptb_coef = 0.005;
+const int step_max = 3000;//16000
+const int roll_max = 1600;
+const char* mname = "fish.xml";
+const int ctrl_num = 6;
+const int NS = 26;
+mjtNum state_nominal[step_max + 1][NS] = { 0.0, 0.0, 0, 0, 0, 0, 1, 0, 0 };
 #endif
 
 // model
@@ -233,6 +208,47 @@ void cofactor(mjtNum num[N][N], mjtNum f)
 	transpose(num, fac, ff);
 }
 
+// w x y z to roll pitch yaw
+void quat2smpl(double *res, double *quat)
+{
+	double b0, b1, b2, b3;
+
+	b0 = *quat;
+	b1 = *(quat + 1);
+	b2 = *(quat + 2);
+	b3 = *(quat + 3);
+
+	Quaterniond q = Eigen::Quaterniond(b0, b1, b2, b3); // w x y z
+	auto r = q.toRotationMatrix().eulerAngles(0, 1, 2);
+
+	*res = r[0];
+	*(res + 1) = r[1];
+	*(res + 2) = r[2];
+}
+
+// roll pitch yaw to w x y z
+void smpl2quat(double *res, double *smpl)
+{
+	double rx, ry, rz; // roll pitch yaw
+
+	rx = *smpl;
+	ry = *(smpl + 1);
+	rz = *(smpl + 2);
+
+	if (rx > PI) rx = PI - rx;
+
+	Quaterniond q = AngleAxisd(rx, Vector3d::UnitX())
+		* AngleAxisd(ry, Vector3d::UnitY())
+		* AngleAxisd(rz, Vector3d::UnitZ());
+
+	Eigen::Vector4d b = q.coeffs(); // x y z w
+
+	*res = b[3];
+	*(res + 1) = b[0];
+	*(res + 2) = b[1];
+	*(res + 3) = b[2];
+}
+
 double gaussrand()
 {
 	static double U, V;
@@ -256,14 +272,15 @@ double gaussrand()
 
 void get_nominal(mjModel* m, mjData* d)
 {
-	static int index = 0, i, y;
+	int index = 0, i, y;
+	mjtNum temp[4];
 #if STATE_LINEAR == true
 	static int step_max = 1;
 #endif
 
 	mju_zero(d->qpos, m->nq);
 	mju_zero(d->qvel, m->nv);
-	for (y = 0; y < m->nq; y++)
+	for (y = 0; y < NS/2; y++)
 	{
 		d->qpos[y] = state_nominal[index][2 * y];
 	}
@@ -276,14 +293,33 @@ void get_nominal(mjModel* m, mjData* d)
 		d->ctrl[y] = ctrl_nominal[index * ctrl_num + y];
 	}
 
+#if defined(EULER)
+	quat2smpl(temp, &(d->qpos[3]));
+	for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = temp[k];
+#elif defined(QUAT)
+	for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = d->qpos[k + 4];
+#endif
+
 	while (index < step_max)
 	{
 		for (i = 0; i < stepite; i++) mj_step(m, d);
 
 		index++;
-		for (y = 0; y < m->nq; y++)
+		for (y = 0; y < 3; y++)
 		{
 			state_nominal[index][2 * y] = d->qpos[y];
+		}
+
+#if defined(EULER)
+		quat2smpl(temp, &(d->qpos[3]));
+		for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = temp[k];
+#elif defined(QUAT)
+		for (int k = 0; k < 3; k++)state_nominal[index][2 * k + 6] = d->qpos[k + 4];
+#endif
+
+		for (y = 7; y < m->nq; y++)
+		{
+			state_nominal[index][2 * (y-1)] = d->qpos[y];
 		}
 		for (y = 0; y < m->nv; y++)
 		{
@@ -300,16 +336,18 @@ void sysidcheck(mjModel* m, mjData* d)
 {
 	static int index = 0;
 	static mjtNum t_init;
+	const int step_max = 1500;
 	int i, j, k;
 	mjtNum dx[n_check][step_max][NS];
 	mjtNum delta_xc[n_check][step_max][NS + ctrl_num] = { 0 };
 	mjtNum delta_xcs[n_check][step_max][NS] = { 0 };
+	mjtNum temp[4];
 
 	for (i = 0; i < NS + ctrl_num; i++)
 	{
 		for (j = 0; j < n_check; j++)
 		{
-			for (k = 0; k < step_max; k++) delta_xc[j][k][i] = 0.01 * ulim * gaussrand();
+			for (k = 0; k < step_max; k++) delta_xc[j][k][i] = 0.005 * ulim * gaussrand();
 		}
 	}
 	for (i = 0; i < n_check; i++)
@@ -321,9 +359,22 @@ void sysidcheck(mjModel* m, mjData* d)
 	{
 		index = 0;
 		t_init = d->time;
-		for (j = 0; j < m->nq; j++)
+		for (j = 0; j < 3; j++)
 		{
 			d->qpos[j] = delta_xc[i][index][2 * j] + state_nominal[index][2 * j];
+		}
+
+#if defined(EULER)
+		for (k = 0; k < 3; k++) temp[k] = delta_xc[i][index][2 * k + 6] + state_nominal[index][2 * k + 6];
+		smpl2quat(&(d->qpos[3]), temp);
+#elif defined(QUAT)
+		for (k = 0; k < 3; k++) d->qpos[k + 4] = delta_xc[i][index][2 * k + 6] + state_nominal[index][2 * k + 6];
+		d->qpos[3] = sqrt(1 - d->qpos[4] * d->qpos[4] - d->qpos[5] * d->qpos[5] - d->qpos[6] * d->qpos[6]);
+#endif
+
+		for (j = 7; j < m->nq; j++)
+		{
+			d->qpos[j] = delta_xc[i][index][2 * (j - 1)] + state_nominal[index][2 * (j - 1)];
 		}
 		for (j = 0; j < m->nv; j++)
 		{
@@ -340,9 +391,21 @@ void sysidcheck(mjModel* m, mjData* d)
 				mj_step(m, d);
 			}
 			else {
-				for (int y = 0; y < m->nq; y++)
+				for (int y = 0; y < 3; y++)
 				{
 					delta_xcs[i][index][2 * y] = d->qpos[y] - state_nominal[index + 1][2 * y];
+				}
+
+#if defined(EULER)
+				quat2smpl(temp, &(d->qpos[3]));
+				for (int k = 0; k < 3; k++) delta_xcs[i][index][2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+#elif defined(QUAT)
+				for (int k = 0; k < 3; k++) delta_xcs[i][index][2 * k + 6] = d->qpos[k+4] - state_nominal[index][2 * k + 6];
+#endif
+
+				for (int y = 7; y < m->nq; y++)
+				{
+					delta_xcs[i][index][2 * (y - 1)] = d->qpos[y] - state_nominal[index + 1][2 * (y - 1)];
 				}
 				for (int y = 0; y < m->nv; y++)
 				{
@@ -352,9 +415,23 @@ void sysidcheck(mjModel* m, mjData* d)
 				index++;
 				t_init = d->time;
 
-				for (int y = 0; y < m->nq; y++)
+				for (int y = 0; y < 3; y++)
 				{
 					d->qpos[y] = delta_xc[i][index][2 * y] + state_nominal[index][2 * y];
+				}
+
+				
+#if defined(EULER)
+				for (int k = 0; k < 3; k++) temp[k] = delta_xc[i][index][2 * k + 6] + state_nominal[index][2 * k + 6];
+				smpl2quat(&(d->qpos[3]), temp);
+#elif defined(QUAT)
+				for (int k = 0; k < 3; k++) d->qpos[k + 4] = delta_xc[i][index][2 * k + 6] + state_nominal[index][2 * k + 6];
+				d->qpos[3] = sqrt(1 - d->qpos[4] * d->qpos[4] - d->qpos[5] * d->qpos[5] - d->qpos[6] * d->qpos[6]);
+#endif
+
+				for (j = 7; j < m->nq; j++)
+				{
+					d->qpos[j] = delta_xc[i][index][2 * (j - 1)] + state_nominal[index][2 * (j - 1)];
 				}
 				for (int y = 0; y < m->nv; y++)
 				{
@@ -423,6 +500,7 @@ void check(mjModel* m, mjData* d)
 
 void setcontrol(mjModel* m, mjData* d)
 {
+	mjtNum temp[4];
 	static int index = 0, i, y;
 #if STATE_LINEAR == true
 	static int step_max = 1;
@@ -430,10 +508,32 @@ void setcontrol(mjModel* m, mjData* d)
 
 	while (index < step_max)
 	{
-		for (y = 0; y < m->nq; y++)
+		for (y = 0; y < 3; y++)
 		{
 			delta_x1[2 * y] = ptb_coef * ulim * gaussrand();
 			d->qpos[y] = delta_x1[2 * y] + state_nominal[index][2 * y];
+		}
+		for (int k = 0; k < 3; k++) {
+			delta_x1[2 * k + 6] = ptb_coef * ulim * gaussrand();
+
+			
+#if defined(EULER)
+			temp[k] = delta_x1[2 * k + 6] + state_nominal[index][2 * k + 6];
+#elif defined(QUAT)
+			d->qpos[k + 4] = delta_x1[2 * k + 6] + state_nominal[index][2 * k + 6];
+#endif
+		}
+		
+#if defined(EULER)
+		smpl2quat(&(d->qpos[3]), temp);
+#elif defined(QUAT)
+		d->qpos[3] = sqrt(1 - d->qpos[4] * d->qpos[4] - d->qpos[5] * d->qpos[5] - d->qpos[6] * d->qpos[6]);
+#endif
+
+		for (int j = 7; j < m->nq; j++)
+		{
+			delta_x1[2 * (j - 1)] = ptb_coef * ulim * gaussrand();
+			d->qpos[j] = delta_x1[2 * (j - 1)] + state_nominal[index][2 * (j - 1)];
 		}
 		for (y = 0; y < m->nv; y++)
 		{
@@ -448,16 +548,28 @@ void setcontrol(mjModel* m, mjData* d)
 
 		for (i = 0; i < stepite; i++) mj_step(m, d);
 
-		for (y = 0; y < m->nq; y++)
+		for (int y = 0; y < 3; y++)
 		{
 			delta_x2[2 * y] = d->qpos[y] - state_nominal[index + 1][2 * y];
 		}
-		for (y = 0; y < m->nv; y++)
+
+#if defined(EULER)
+		quat2smpl(temp, &(d->qpos[3]));
+		for (int k = 0; k < 3; k++) delta_x2[2 * k + 6] = temp[k] - state_nominal[index][2 * k + 6];
+#elif defined(QUAT)
+		for (int k = 0; k < 3; k++) delta_x2[2 * k + 6] = d->qpos[k+4] - state_nominal[index][2 * k + 6];
+#endif
+
+		for (int y = 7; y < m->nq; y++)
+		{
+			delta_x2[2 * (y - 1)] = d->qpos[y] - state_nominal[index + 1][2 * (y - 1)];
+		}
+		for (int y = 0; y < m->nv; y++)
 		{
 			delta_x2[2 * y + 1] = d->qvel[y] - state_nominal[index + 1][2 * y + 1];
-		}
+		} 
 
-		// option 1: iteration method
+		// iteration method
 		for (y = 0; y < NS; y++)
 		{
 			for (i = 0; i < NS + ctrl_num; i++)
@@ -506,15 +618,6 @@ int main(int argc, const char** argv)
     d = mj_makeData(m);
     if( !d )
         return finish("Could not allocate mjData", m);
-
-	if (STATE_LINEAR == true)
-	{
-		#if defined(PENDULUM)
-				state_nominal[0][0] = 0;
-		#elif defined(CARTPOLE)
-				state_nominal[0][2] = -PI;
-		#endif
-	}
 
 	srand((unsigned)time(NULL));
 	strcpy(dfilename, dfilepre);
@@ -569,7 +672,6 @@ int main(int argc, const char** argv)
         }
     }
     double end = gettm();
-	sysidcheck(m, d);
 
     // print results
     printf("\n Simulation time      : %.2f s\n", end-start);
@@ -577,6 +679,8 @@ int main(int argc, const char** argv)
     printf(" Contacts per step    : %d\n", contacts/mjMAX(1,steps));
     printf(" Constraints per step : %d\n", constraints/mjMAX(1,steps));
     printf(" Degrees of freedom   : %d\n\n", m->nv);
+
+	sysidcheck(m, d);
 
 	// print result
 	#if STATE_LINEAR == true
